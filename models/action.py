@@ -5,7 +5,6 @@ from .base import MongoBaseModel
 class Action(MongoBaseModel):
     __tablename__ = "action"
 
-    _id: int
     name: str
     source: str
     source_hash: str

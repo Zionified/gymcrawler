@@ -8,10 +8,8 @@ import requests
 import tqdm
 
 from bs4 import BeautifulSoup
-from sqlalchemy import select, text
-
-from db.engine import get_engine, get_session
-from db.models.sourcehtml import SourceHTML
+from models import SourceHTML
+from db.mongo import get_mongo_client
 
 
 DOMAIN_NAME = "http:"
@@ -42,8 +40,8 @@ def delay(seconds=1):
 
     return wrapper
 
+
 def print_datetime(func):
-    
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         start_time = datetime.datetime.now()
@@ -53,8 +51,14 @@ def print_datetime(func):
             raise
         finally:
             end_time = datetime.datetime.now()
-            print("start time: {}, end time: {}, time elapsed: {}".format(start_time, end_time, end_time - start_time))
+            print(
+                "start time: {}, end time: {}, time elapsed: {}".format(
+                    start_time, end_time, end_time - start_time
+                )
+            )
+
     return wrapper
+
 
 # @print_datetime
 @delay(1)
@@ -65,36 +69,37 @@ def send_get_request(url, *args, **kwargs):
 
 
 def crawl_actions_by_pages():
+    db = get_mongo_client()["gymcrawler"]
+
     total_pages = range(1, 81)
     # total_pages = [1]
 
     for page_no in tqdm.tqdm(total_pages):
         page_url = "http://m.elainecroche.com/dongzuo/?page={}".format(page_no)
+        page_url_hash = hashlib.md5(page_url.encode("utf-8")).hexdigest()
+
+        if (
+            db[SourceHTML.__tablename__].find_one({"source_hash": page_url_hash})
+            is not None
+        ):
+            continue
         try:
             resp = send_get_request(page_url, timeout=1)
         except KeyboardInterrupt:
             return
         except:
             continue
-        page_url_hash = hashlib.md5(page_url.encode("utf-8")).hexdigest()
 
-        with get_session() as session:
-            if (
-                session.scalars(
-                    select(SourceHTML).where(SourceHTML.source_hash == page_url_hash)
-                ).first()
-                is not None
-            ):
-                continue
-
-            session.add(
-                SourceHTML(
-                    source=page_url,
-                    source_hash=page_url_hash,
-                    content=resp.content.decode(),
-                )
-            )
-            session.commit()
+        db[SourceHTML.__tablename__].replace_one(
+            {"source_hash": page_url_hash},
+            SourceHTML(
+                source=page_url,
+                source_hash=page_url_hash,
+                content=resp.content.decode(),
+                create_time=datetime.datetime.now(),
+            ).to_bson(),
+            upsert=True,
+        )
         # print(page_url, resp.content.decode())
 
         html = BeautifulSoup(resp.content.decode(), "html.parser")
@@ -111,6 +116,18 @@ def crawl_actions_by_pages():
         # print(action_default_urls)
 
         for action_default_url in action_default_urls:
+            action_default_url_hash = hashlib.md5(
+                action_default_url.encode("utf-8")
+            ).hexdigest()
+
+            if (
+                db[SourceHTML.__tablename__].find_one(
+                    {"source_hash": action_default_url_hash}
+                )
+                is not None
+            ):
+                continue
+
             try:
                 resp = send_get_request(action_default_url, timeout=1)
             except KeyboardInterrupt:
@@ -119,30 +136,16 @@ def crawl_actions_by_pages():
                 continue
             html = BeautifulSoup(resp.content.decode(), "html.parser")
 
-            action_default_url_hash = hashlib.md5(
-                action_default_url.encode("utf-8")
-            ).hexdigest()
-
-            # print("inserting ", action_default_url)
-            with get_session() as session:
-                if (
-                    session.scalars(
-                        select(SourceHTML).where(
-                            SourceHTML.source_hash == action_default_url_hash
-                        )
-                    ).first()
-                    is not None
-                ):
-                    continue
-
-                session.add(
-                    SourceHTML(
-                        source=action_default_url,
-                        source_hash=action_default_url_hash,
-                        content=resp.content.decode(),
-                    )
-                )
-                session.commit()
+            db[SourceHTML.__tablename__].replace_one(
+                {"source_hash": action_default_url_hash},
+                SourceHTML(
+                    source=action_default_url,
+                    source_hash=action_default_url_hash,
+                    content=resp.content.decode(),
+                    create_time=datetime.datetime.now(),
+                ).to_bson(),
+                upsert=True,
+            )
 
 
 def run():

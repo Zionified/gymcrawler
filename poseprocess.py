@@ -11,21 +11,27 @@ import requests
 from sqlalchemy import select
 import tqdm
 from db.engine import get_session
-from db.models import Action
-from db.models.sourcehtml import SourceHTML
+from models import SourceHTML, Action
+from db.mongo import get_mongo_client
 
 DOMAIN_NAME = "http:"
 
 
 def run():
-    with get_session() as session:
-        unhandled_source_htmls = list(
-            session.scalars(select(SourceHTML).order_by(SourceHTML.id.asc())).all()
-        )
-
+    # with get_session() as session:
+    #     unhandled_source_htmls = list(
+    #         session.scalars(select(SourceHTML).order_by(SourceHTML.id.asc())).all()
+    #     )
+    db = get_mongo_client()["gymcrawler"]
+    unhandled_source_htmls = [
+        SourceHTML.from_bson(**i)
+        for i in db[SourceHTML.__tablename__].find({}).sort("_id", 1)
+    ]
     # 详情页
-    for unhandled_source_html in tqdm.tqdm(unhandled_source_htmls, desc="processing actions"):
-    # for unhandled_source_html in unhandled_source_htmls:
+    for unhandled_source_html in tqdm.tqdm(
+        unhandled_source_htmls, desc="processing actions"
+    ):
+        # for unhandled_source_html in unhandled_source_htmls:
         name = ""
         source = unhandled_source_html.source
         source_hash = unhandled_source_html.source_hash
@@ -211,12 +217,10 @@ def run():
                     for muscle_picture in action_detail_list[1].find_all("img")
                 ]
                 # print("muscle_pictures: ", muscle_pictures)
-                
+
             with get_session() as session:
                 action_id = session.scalar(
-                    select(Action.id).where(
-                        Action.source == source
-                    )
+                    select(Action.id).where(Action.source == source)
                 )
                 if action_id is None:
                     session.add(
@@ -254,10 +258,14 @@ def run():
                 source_hash = hashlib.md5(source.encode("utf-8")).hexdigest()
 
                 with get_session() as session:
-                    source_id = session.scalar(select(SourceHTML.id).where(SourceHTML.source_hash == source_hash))
+                    source_id = session.scalar(
+                        select(SourceHTML.id).where(
+                            SourceHTML.source_hash == source_hash
+                        )
+                    )
                     if source_id is not None:
                         continue
-                    
+
                     action_id = session.scalar(
                         select(Action.id).where(Action.source_hash == source_hash)
                     )
@@ -334,6 +342,7 @@ def run():
                             )
                         )
                         session.commit()
+
 
 if __name__ == "__main__":
     run()
