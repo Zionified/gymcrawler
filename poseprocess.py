@@ -254,6 +254,10 @@ def run():
                 source_hash = hashlib.md5(source.encode("utf-8")).hexdigest()
 
                 with get_session() as session:
+                    source_id = session.scalar(select(SourceHTML.id).where(SourceHTML.source_hash == source_hash))
+                    if source_id is not None:
+                        continue
+                    
                     action_id = session.scalar(
                         select(Action.id).where(Action.source_hash == source_hash)
                     )
