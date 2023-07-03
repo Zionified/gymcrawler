@@ -3,6 +3,7 @@ from pydantic import BaseModel
 class MongoBaseModel(BaseModel):
     mongo_id: str | None = None
     
+    @classmethod
     def from_bson(cls, **kwargs):
         if "_id" in kwargs:
             kwargs["_id"] = str(kwargs["_id"])

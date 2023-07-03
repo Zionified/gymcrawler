@@ -1,16 +1,9 @@
 # -*- coding: utf-8 -*-
-
-# 判断是page还是详情页，如果是详情页直接按照variable拿并入库即可，如果是pages就遍历所有的element如果没有入库的，就拿缩减版的数据
+import datetime
 import hashlib
-from importlib.util import source_hash
-import json
-from logging import info
 import re
 from bs4 import BeautifulSoup
-import requests
-from sqlalchemy import select
 import tqdm
-from db.engine import get_session
 from models import SourceHTML, Action
 from db.mongo import get_mongo_client
 
@@ -18,10 +11,6 @@ DOMAIN_NAME = "http:"
 
 
 def run():
-    # with get_session() as session:
-    #     unhandled_source_htmls = list(
-    #         session.scalars(select(SourceHTML).order_by(SourceHTML.id.asc())).all()
-    #     )
     db = get_mongo_client()["gymcrawler"]
     unhandled_source_htmls = [
         SourceHTML.from_bson(**i)
@@ -197,10 +186,10 @@ def run():
                     "div", class_="action-video"
                 ).find("video")
 
-                cover = video_info["poster"]
+                cover = video_info["poster"][0]
                 # print("cover: ", cover)
 
-                video = video_info["src"]
+                video = video_info["src"][0]
                 # print("video: ", video)
 
                 action_pictures = []
@@ -218,35 +207,27 @@ def run():
                 ]
                 # print("muscle_pictures: ", muscle_pictures)
 
-            with get_session() as session:
-                action_id = session.scalar(
-                    select(Action.id).where(Action.source == source)
+            if db[Action.__tablename__].find_one({"source": source}) is None:
+                db[Action.__tablename__].replace_one(
+                    {"source": source},
+                    Action(
+                        name=name,
+                        source=source,
+                        source_hash=source_hash,
+                        difficulty_level=difficulty_level,
+                        category=category,
+                        muscle_type=muscle_type,
+                        other_muscle_types=other_muscle_types,
+                        equipment=equipment,
+                        cover=cover,
+                        action_pictures=action_pictures,
+                        muscle_pictures=muscle_pictures,
+                        video=video,
+                        instruction=instruction,
+                        create_time=datetime.datetime.now(),
+                    ).to_bson(),
+                    upsert=True,
                 )
-                if action_id is None:
-                    session.add(
-                        Action(
-                            name=name,
-                            source=source,
-                            source_hash=source_hash,
-                            difficulty_level=difficulty_level,
-                            category=category,
-                            muscle_type=json.dumps(muscle_type, ensure_ascii=False),
-                            other_muscle_types=json.dumps(
-                                other_muscle_types, ensure_ascii=False
-                            ),
-                            equipment=json.dumps(equipment, ensure_ascii=False),
-                            cover=cover,
-                            action_pictures=json.dumps(
-                                action_pictures, ensure_ascii=False
-                            ),
-                            muscle_pictures=json.dumps(
-                                muscle_pictures, ensure_ascii=False
-                            ),
-                            video=video,
-                            instruction=instruction,
-                        )
-                    )
-                    session.commit()
         else:
             html = BeautifulSoup(unhandled_source_html.content, "html.parser")
             action_list = (
@@ -257,91 +238,79 @@ def run():
                 source = DOMAIN_NAME + avatar_container["href"]
                 source_hash = hashlib.md5(source.encode("utf-8")).hexdigest()
 
-                with get_session() as session:
-                    source_id = session.scalar(
-                        select(SourceHTML.id).where(
-                            SourceHTML.source_hash == source_hash
-                        )
+                if (
+                    db[SourceHTML.__tablename__].find_one({"source_hash": source_hash})
+                    is not None
+                ):
+                    continue
+
+                if (
+                    db[Action.__tablename__].find_one({"source_hash": source_hash})
+                    is None
+                ):
+                    action_content_container = action.find("div", class_="cont")
+                    name = (
+                        action_content_container.find("a", href=re.compile(r"^//.*"))
+                        .find("span", class_="title")
+                        .text.strip()
                     )
-                    if source_id is not None:
-                        continue
+                    # print("name: ", name)
 
-                    action_id = session.scalar(
-                        select(Action.id).where(Action.source_hash == source_hash)
+                    action_basic_info_values = [
+                        action_basic_info_value.text.strip()
+                        for action_basic_info_value in action_content_container.find(
+                            "div", class_="tag"
+                        ).find_all("span")
+                    ]
+                    action_basic_info_keys = ["级别", "器械要求", "主要肌肉群"]
+                    action_basic_info = dict(
+                        zip(action_basic_info_keys, action_basic_info_values)
                     )
-                    if action_id is None:
-                        # print("source: ", source)
-                        action_content_container = action.find("div", class_="cont")
-                        name = (
-                            action_content_container.find(
-                                "a", href=re.compile(r"^//.*")
-                            )
-                            .find("span", class_="title")
-                            .text.strip()
-                        )
-                        # print("name: ", name)
 
-                        action_basic_info_values = [
-                            action_basic_info_value.text.strip()
-                            for action_basic_info_value in action_content_container.find(
-                                "div", class_="tag"
-                            ).find_all(
-                                "span"
-                            )
-                        ]
-                        action_basic_info_keys = ["级别", "器械要求", "主要肌肉群"]
-                        action_basic_info = dict(
-                            zip(action_basic_info_keys, action_basic_info_values)
-                        )
+                    difficulty_level = action_basic_info["级别"]
+                    # print("difficult level: ", difficulty_level)
 
-                        difficulty_level = action_basic_info["级别"]
-                        # print("difficult level: ", difficulty_level)
+                    equipment = [
+                        i.strip() for i in action_basic_info["器械要求"].split(",")
+                    ]
+                    # print("equipment: ", equipment)
 
-                        equipment = [
-                            i.strip() for i in action_basic_info["器械要求"].split(",")
-                        ]
-                        # print("equipment: ", equipment)
+                    muscle_type = [
+                        i.strip()
+                        for i in action_basic_info["主要肌肉群"]
+                        .replace("默认,", "")
+                        .split(",")
+                    ]
+                    # print("muscle_type: ", muscle_type)
 
-                        muscle_type = [
-                            i.strip()
-                            for i in action_basic_info["主要肌肉群"]
-                            .replace("默认,", "")
-                            .split(",")
-                        ]
-                        # print("muscle_type: ", muscle_type)
+                    cover = avatar_container.find("div", class_="avatar-pic").find(
+                        "img"
+                    )["src"]
+                    # print("cover: ", cover)
 
-                        cover = avatar_container.find("div", class_="avatar-pic").find(
-                            "img"
-                        )["src"]
-                        # print("cover: ", cover)
+                    action_pictures = [cover]
+                    # print("action_pictures: ", action_pictures)
 
-                        action_pictures = [cover]
-                        # print("action_pictures: ", action_pictures)
-
-                        session.add(
-                            Action(
-                                name=name,
-                                source=source,
-                                source_hash=source_hash,
-                                difficulty_level=difficulty_level,
-                                category=category,
-                                muscle_type=json.dumps(muscle_type, ensure_ascii=False),
-                                other_muscle_types=json.dumps(
-                                    other_muscle_types, ensure_ascii=False
-                                ),
-                                equipment=json.dumps(equipment, ensure_ascii=False),
-                                cover=cover,
-                                action_pictures=json.dumps(
-                                    action_pictures, ensure_ascii=False
-                                ),
-                                muscle_pictures=json.dumps(
-                                    muscle_pictures, ensure_ascii=False
-                                ),
-                                video=video,
-                                instruction=instruction,
-                            )
-                        )
-                        session.commit()
+                    db[Action.__tablename__].replace_one(
+                        {"source_hash": source_hash},
+                        Action(
+                            name=name,
+                            source=source,
+                            source_hash=source_hash,
+                            difficulty_level=difficulty_level,
+                            category=category,
+                            muscle_type=muscle_type,
+                            other_muscle_types=other_muscle_types,
+                            equipment=equipment,
+                            cover=cover,
+                            action_pictures=action_pictures,
+                            muscle_pictures=muscle_pictures,
+                            video=video,
+                            instruction=instruction,
+                            create_time=datetime.datetime.now()
+                        ).to_bson(),
+                        upsert=True,
+                    )
 
 
 if __name__ == "__main__":
